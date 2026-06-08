@@ -430,10 +430,9 @@ static struct symbol *sym_add_exported(const char *name, struct module *mod,
 		s = new_symbol(name, mod, export);
 	} else if (!external_module || s->module->is_vmlinux ||
 		   s->module == mod) {
-		warn("%s: '%s' exported twice. Previous export was in %s%s\n",
-		     mod->name, name, s->module->name,
-		     s->module->is_vmlinux ? "" : ".ko");
-		return s;
+		fatal("%s: '%s' exported twice. Previous export was in %s%s\n",
+		      mod->name, name, s->module->name,
+		      s->module->is_vmlinux ? "" : ".ko");
 	}
 
 	s->module = mod;
@@ -2648,7 +2647,7 @@ int main(int argc, char **argv)
 
 		for (s = symbolhash[n]; s; s = s->next) {
 			if (s->is_static)
-				error("\"%s\" [%s] is a static %s\n",
+				fatal("\"%s\" [%s] is a static %s\n",
 				      s->name, s->module->name,
 				      export_str(s->export));
 		}

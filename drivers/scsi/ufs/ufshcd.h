@@ -324,6 +324,12 @@ struct ufs_pwr_mode_info {
  * @device_reset: called to issue a reset pulse on the UFS device
  * @program_key: program or evict an inline encryption key
  * @event_notify: called to notify important events
+ * @fill_prdt: called after initializing the standard PRDT fields so that any
+ *	       variant-specific PRDT fields can be initialized too
+ * @prepare_command: called when receiving a request in the first place
+ * @update_sysfs: adds vendor-specific sysfs entries
+ * @send_command: adds vendor-specific work when sending a command
+ * @compl_command: adds vendor-specific work when completing a command
  */
 struct ufs_hba_variant_ops {
 	const char *name;
@@ -360,6 +366,13 @@ struct ufs_hba_variant_ops {
 			       const union ufs_crypto_cfg_entry *cfg, int slot);
 	void	(*event_notify)(struct ufs_hba *hba,
 				enum ufs_event_type evt, void *data);
+	int	(*fill_prdt)(struct ufs_hba *hba, struct ufshcd_lrb *lrbp,
+			     unsigned int segments);
+	int	(*prepare_command)(struct ufs_hba *hba,
+				struct request *rq, struct ufshcd_lrb *lrbp);
+	int     (*update_sysfs)(struct ufs_hba *hba);
+	void	(*send_command)(struct ufs_hba *hba, struct ufshcd_lrb *lrbp);
+	void	(*compl_command)(struct ufs_hba *hba, struct ufshcd_lrb *lrbp);
 };
 
 /* clock gating state  */
@@ -551,6 +564,28 @@ enum ufshcd_quirks {
 	 */
 	UFSHCI_QUIRK_SKIP_MANUAL_WB_FLUSH_CTRL		= 1 << 12,
 
+	/*
+	 * This quirk needs to be enabled if the host controller supports inline
+	 * encryption, but it needs to initialize the crypto capabilities in a
+	 * nonstandard way and/or it needs to override blk_ksm_ll_ops.  If
+	 * enabled, the standard code won't initialize the blk_keyslot_manager;
+	 * ufs_hba_variant_ops::init() must do it instead.
+	 */
+	UFSHCD_QUIRK_CUSTOM_KEYSLOT_MANAGER		= 1 << 20,
+
+	/*
+	 * This quirk needs to be enabled if the host controller supports inline
+	 * encryption, but the CRYPTO_GENERAL_ENABLE bit is not implemented and
+	 * breaks the HCE sequence if used.
+	 */
+	UFSHCD_QUIRK_BROKEN_CRYPTO_ENABLE		= 1 << 21,
+
+	/*
+	 * This quirk needs to be enabled if the host controller requires that
+	 * the PRDT be cleared after each encrypted request because encryption
+	 * keys were stored in it.
+	 */
+	UFSHCD_QUIRK_KEYS_IN_PRDT			= 1 << 22,
 };
 
 enum ufshcd_caps {
@@ -646,6 +681,7 @@ struct ufs_hba_variant_params {
  * @ufs_version: UFS Version to which controller complies
  * @vops: pointer to variant specific operations
  * @priv: pointer to variant specific private data
+ * @sg_entry_size: size of struct ufshcd_sg_entry (may include variant fields)
  * @irq: Irq number of the controller
  * @active_uic_cmd: handle of active UIC command
  * @uic_cmd_mutex: mutex for uic command
@@ -732,6 +768,7 @@ struct ufs_hba {
 	const struct ufs_hba_variant_ops *vops;
 	struct ufs_hba_variant_params *vps;
 	void *priv;
+	size_t sg_entry_size;
 	unsigned int irq;
 	bool is_irq_enabled;
 	enum ufs_ref_clk_freq dev_ref_clk_freq;
@@ -1042,8 +1079,14 @@ int ufshcd_read_desc_param(struct ufs_hba *hba,
 			   u8 param_size);
 int ufshcd_query_attr(struct ufs_hba *hba, enum query_opcode opcode,
 		      enum attr_idn idn, u8 index, u8 selector, u32 *attr_val);
+int ufshcd_query_attr_retry(struct ufs_hba *hba,
+	enum query_opcode opcode, enum attr_idn idn, u8 index, u8 selector,
+	u32 *attr_val);
 int ufshcd_query_flag(struct ufs_hba *hba, enum query_opcode opcode,
 	enum flag_idn idn, u8 index, bool *flag_res);
+int ufshcd_query_flag_retry(struct ufs_hba *hba,
+	enum query_opcode opcode, enum flag_idn idn, u8 index, bool *flag_res);
+int ufshcd_bkops_ctrl(struct ufs_hba *hba, enum bkops_status status);
 
 void ufshcd_auto_hibern8_enable(struct ufs_hba *hba);
 void ufshcd_auto_hibern8_update(struct ufs_hba *hba, u32 ahit);
@@ -1238,6 +1281,45 @@ static inline void ufshcd_vops_config_scaling_param(struct ufs_hba *hba,
 		hba->vops->config_scaling_param(hba, profile, data);
 }
 
+static inline int ufshcd_vops_fill_prdt(struct ufs_hba *hba,
+					struct ufshcd_lrb *lrbp,
+					unsigned int segments)
+{
+	if (hba->vops && hba->vops->fill_prdt)
+		return hba->vops->fill_prdt(hba, lrbp, segments);
+
+	return 0;
+}
+
+static inline int ufshcd_vops_prepare_command(struct ufs_hba *hba,
+		struct request *rq, struct ufshcd_lrb *lrbp)
+{
+	if (hba->vops && hba->vops->prepare_command)
+		return hba->vops->prepare_command(hba, rq, lrbp);
+	return 0;
+}
+
+static inline int ufshcd_vops_update_sysfs(struct ufs_hba *hba)
+{
+	if (hba->vops && hba->vops->update_sysfs)
+		return hba->vops->update_sysfs(hba);
+	return 0;
+}
+
+static inline void ufshcd_vops_send_command(struct ufs_hba *hba,
+				struct ufshcd_lrb *lrbp)
+{
+	if (hba->vops && hba->vops->send_command)
+		hba->vops->send_command(hba, lrbp);
+}
+
+static inline void ufshcd_vops_compl_command(struct ufs_hba *hba,
+				struct ufshcd_lrb *lrbp)
+{
+	if (hba->vops && hba->vops->compl_command)
+		hba->vops->compl_command(hba, lrbp);
+}
+
 extern struct ufs_pm_lvl_states ufs_pm_lvl_states[];
 
 /*
@@ -1257,5 +1339,6 @@ static inline u8 ufshcd_scsi_to_upiu_lun(unsigned int scsi_lun)
 
 int ufshcd_dump_regs(struct ufs_hba *hba, size_t offset, size_t len,
 		     const char *prefix);
-
+int ufshcd_uic_hibern8_enter(struct ufs_hba *hba);
+int ufshcd_uic_hibern8_exit(struct ufs_hba *hba);
 #endif /* End of Header */
