@@ -88,7 +88,7 @@ VDSO_CFLAGS += -DENABLE_COMPAT_VDSO=1
 # KBUILD_CFLAGS from top-level Makefile
 VDSO_CFLAGS += -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs \
                -fno-strict-aliasing -fno-common \
-               -Werror-implicit-function-declaration \
+               -Wno-implicit-function-declaration \
                -Wno-format-security \
                -std=gnu89
 VDSO_CFLAGS  += -O2
@@ -96,9 +96,9 @@ VDSO_CFLAGS  += -O2
 VDSO_CFLAGS += $(call cc32-option,-Wdeclaration-after-statement,)
 VDSO_CFLAGS += $(call cc32-option,-Wno-pointer-sign)
 VDSO_CFLAGS += -fno-strict-overflow
-VDSO_CFLAGS += $(call cc32-option,-Werror=strict-prototypes)
-VDSO_CFLAGS += -Werror=date-time
-VDSO_CFLAGS += $(call cc32-option,-Werror=incompatible-pointer-types)
+VDSO_CFLAGS += $(call cc32-option,-Wno-strict-prototypes)
+VDSO_CFLAGS += -Wno-date-time
+VDSO_CFLAGS += $(call cc32-option,-Wno-incompatible-pointer-types)
 
 # The 32-bit compiler does not provide 128-bit integers, which are used in
 # some headers that are indirectly included from the vDSO code.

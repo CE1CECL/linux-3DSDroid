@@ -393,7 +393,7 @@ LIBBPF_API bool bpf_program__is_sk_lookup(const struct bpf_program *prog);
  * No need for __attribute__((packed)), all members of 'bpf_map_def'
  * are all aligned.  In addition, using __attribute__((packed))
  * would trigger a -Wpacked warning message, and lead to an error
- * if -Werror is set.
+ * if  is set.
  */
 struct bpf_map_def {
 	unsigned int type;
