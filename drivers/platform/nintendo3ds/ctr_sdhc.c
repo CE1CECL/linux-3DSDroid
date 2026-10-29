@@ -7,6 +7,9 @@
  *  Based on toshsd.c, copyright (C) 2014 Ondrej Zary and 2007 Richard Betts
  */
 
+#define DRIVER_NAME	"3ds-sdhc"
+#define pr_fmt(fmt) DRIVER_NAME ": " fmt
+
 #include <linux/io.h>
 #include <linux/of.h>
 #include <linux/clk.h>
@@ -33,7 +36,7 @@ enum {
 	DMABUF_MAPPED = 2,
 };
 
-#define SDHC_ERR_MASK \
+#define SDHC_ERRMASK \
 	(SDHC_ERR_BAD_CMD | SDHC_ERR_CRC_FAIL | SDHC_ERR_STOP_BIT | \
 	 SDHC_ERR_DATATIMEOUT | SDHC_ERR_TX_OVERFLOW | SDHC_ERR_RX_UNDERRUN | \
 	 SDHC_ERR_CMD_TIMEOUT | SDHC_ERR_ILLEGAL_ACC)
@@ -41,7 +44,7 @@ enum {
 #define SDHC_IRQMASK \
 	(SDHC_STAT_CARDREMOVE | SDHC_STAT_CARDINSERT | \
 	 SDHC_STAT_DATA_END | \
-	 SDHC_ERR_MASK | SDHC_STAT_CMDRESPEND)
+	 SDHC_ERRMASK | SDHC_STAT_CMDRESPEND)
 
 #define SDHC_DEFAULT_CARDOPT \
 	(SDHC_CARD_OPTION_RETRIES(14) | \
@@ -50,6 +53,122 @@ enum {
 
 // freeze the CLK pin when inactive if running above 10MHz
 #define SDHC_CLKFREEZE_THRESHOLD	(10000000)
+
+#define ctr_sdhc_reg16_set(h, o, v)	iowrite16((v), (h)->regs + (o))
+#define ctr_sdhc_reg32_set(h, o, v)	iowrite32((v), (h)->regs + (o))
+
+#define ctr_sdhc_reg16_get(h, o)	ioread16((h)->regs + (o))
+#define ctr_sdhc_reg32_get(h, o)	ioread32((h)->regs + (o))
+
+static int ctr_sdhc_reset(struct ctr_sdhc *host)
+{
+	/* reset controller */
+	ctr_sdhc_reg16_set(host, SDHC_SOFTRESET, 0);
+	ctr_sdhc_reg16_set(host, SDHC_SOFTRESET, 1);
+
+	/* clear registers */
+	ctr_sdhc_reg16_set(host, SDHC_CARD_PORTSEL, 0);
+	ctr_sdhc_reg16_set(host, SDHC_CARD_CLKCTL, 0);
+	ctr_sdhc_reg32_set(host, SDHC_ERROR_STATUS, 0);
+	ctr_sdhc_reg16_set(host, SDHC_STOP_INTERNAL, 0);
+
+	ctr_sdhc_reg16_set(host, SDHC_DATA16_BLK_CNT, 0);
+	ctr_sdhc_reg16_set(host, SDHC_DATA16_BLK_LEN, 0);
+
+	ctr_sdhc_reg16_set(host, SDHC_DATA32_BLK_CNT, 0);
+	ctr_sdhc_reg16_set(host, SDHC_DATA32_BLK_LEN, 0);
+
+	/* always use the 32bit FIFO */
+	ctr_sdhc_reg16_set(host, SDHC_DATA_CTL, SDHC_DATA_CTL_WORD_FIFO_EN);
+	ctr_sdhc_reg16_set(host, SDHC_DATA32_CTL,
+			   SDHC_DATA32_CTL_WORD_FIFO_EN |
+			   SDHC_DATA32_CTL_WORD_FIFO_CLR);
+
+	/* set interrupt masks */
+	ctr_sdhc_reg32_set(host, SDHC_IRQ_MASK, ~SDHC_IRQMASK);
+	ctr_sdhc_reg32_set(host, SDHC_IRQ_STAT, ~SDHC_IRQMASK);
+
+	ctr_sdhc_reg16_set(host, SDHC_CARD_OPTION, SDHC_DEFAULT_CARDOPT);
+	return 0;
+}
+
+static int ctr_sdhc_set_clk_opt(struct ctr_sdhc *host, u16 clk, u16 opt)
+{
+	ctr_sdhc_reg16_set(host, SDHC_CARD_CLKCTL, clk);
+	ctr_sdhc_reg16_set(host, SDHC_CARD_OPTION, opt);
+	return 0;
+}
+
+static int ctr_sdhc_send_cmdarg(struct ctr_sdhc *host, u16 cmd, u32 arg)
+{
+	ctr_sdhc_reg32_set(host, SDHC_CMD_PARAM, arg);
+	ctr_sdhc_reg16_set(host, SDHC_CMD, cmd);
+	return 0;
+}
+
+static int ctr_sdhc_set_blk_len_cnt(struct ctr_sdhc *host, u16 len, u16 cnt)
+{
+	ctr_sdhc_reg16_set(host, SDHC_DATA16_BLK_LEN, len);
+	ctr_sdhc_reg16_set(host, SDHC_DATA16_BLK_CNT, cnt);
+
+	ctr_sdhc_reg16_set(host, SDHC_DATA32_BLK_LEN, len);
+	ctr_sdhc_reg16_set(host, SDHC_DATA32_BLK_CNT, cnt);
+	return 0;
+}
+
+static int ctr_sdhc_get_resp(struct ctr_sdhc *host, u32 *resp, unsigned n)
+{
+	int i;
+	for (i = 0; i < n; i++)
+		resp[i] = ctr_sdhc_reg32_get(host, SDHC_CMD_RESPONSE + (i * 4));
+	return 0;
+}
+
+static int ctr_sdhc_stop_internal_set(struct ctr_sdhc *host, u16 val)
+{
+	ctr_sdhc_reg16_set(host, SDHC_STOP_INTERNAL, val);
+	return 0;
+}
+
+static u32 ctr_sdhc_irqstat_get(struct ctr_sdhc *host)
+{
+	return ctr_sdhc_reg32_get(host, SDHC_IRQ_STAT);
+}
+
+static int ctr_sdhc_irqstat_ack(struct ctr_sdhc *host, u32 ack)
+{
+	ctr_sdhc_reg32_set(host, SDHC_IRQ_STAT, ~ack);
+	return 0;
+}
+
+static int ctr_sdhc_irqmask_set(struct ctr_sdhc *host, u32 mask)
+{
+	ctr_sdhc_reg32_set(host, SDHC_IRQ_MASK, mask);
+	return 0;
+}
+
+static int ctr_sdhc_sdioirq_test(struct ctr_sdhc *host)
+{
+	u16 state = ctr_sdhc_reg16_get(host, SDHC_CARD_IRQ_STAT);
+
+	if (state & 1) {
+		/* acknowledge the SDIO IRQ */
+		ctr_sdhc_reg16_set(host, SDHC_CARD_IRQ_STAT, state & ~1);
+		return 1;
+	}
+	return 0;
+}
+
+static int ctr_sdhc_sdioirq_set(struct ctr_sdhc *host, int enable)
+{
+	/* always acknowledge the card interrupts first */
+	ctr_sdhc_reg16_set(host, SDHC_CARD_IRQ_STAT, 0);
+
+	/* either disable all interrupts _except_ SDIO IRQ, or disable all */
+	ctr_sdhc_reg16_set(host, SDHC_CARD_IRQ_MASK, enable ? ~1 : ~0);
+
+	return 0;
+}
 
 static void __ctr_sdhc_set_ios(struct ctr_sdhc *host, struct mmc_ios *ios)
 {
@@ -212,9 +331,9 @@ static irqreturn_t ctr_sdhc_irq_thread(int irq, void *data)
 		error = -ETIMEDOUT;
 	} else if (irqstat & SDHC_ERR_CRC_FAIL) {
 		error = -EILSEQ;
-	} else if (irqstat & SDHC_ERR_MASK) {
+	} else if (irqstat & SDHC_ERRMASK) {
 		dev_err(host->dev, "buffer error: %08X\n",
-			irqstat & SDHC_ERR_MASK);
+			irqstat & SDHC_ERRMASK);
 		/*dev_err(host->dev, "detail error status %08X\n",
 			ioread32(host->regs + SDHC_ERROR_STATUS));*/
 		error = -EIO;
